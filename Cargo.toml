@@ -27,6 +27,11 @@ path = "src/lib.rs"
 name = "gtnh-updater"
 path = "src/main.rs"
 
+# Windows builds are GUI-subsystem so double-clicking the exe does not open a
+# console; the CLI modes attach to the parent console instead.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"

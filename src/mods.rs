@@ -3,17 +3,28 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Prism turns a mod off by appending this to its filename.
+pub const DISABLED_SUFFIX: &str = ".disabled";
+
+/// Split a mod filename into the name it has when enabled, and whether it is.
+pub fn split_disabled(filename: &str) -> (&str, bool) {
+    match filename.strip_suffix(DISABLED_SUFFIX) {
+        Some(base) => (base, false),
+        None => (filename, true),
+    }
+}
+
 /// Strip the version from a jar filename so the same mod matches across builds.
 ///
 /// `angelica-2.1.56.jar` and `angelica-2.2.0.jar` both reduce to `angelica`.
 /// The exact stem does not matter as long as it is stable between versions, so
 /// the rule is simply: cut at the first dash-separated token that is a number.
 pub fn mod_key(filename: &str) -> String {
-    let stem = filename
+    let (enabled_name, _) = split_disabled(filename);
+    let stem = enabled_name
         .strip_suffix(".jar")
-        .or_else(|| filename.strip_suffix(".litemod"))
-        .or_else(|| filename.strip_suffix(".jar.disabled"))
-        .unwrap_or(filename);
+        .or_else(|| enabled_name.strip_suffix(".litemod"))
+        .unwrap_or(enabled_name);
     let parts: Vec<&str> = stem.split('-').collect();
     let mut cut = parts.len();
     for (i, part) in parts.iter().enumerate() {
@@ -60,6 +71,17 @@ pub struct ModDecision {
     pub size: u64,
 }
 
+/// A mod the new pack ships in a different on/off state than you had it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModStateChange {
+    /// Path of the file as the new pack ships it, relative to `.minecraft`.
+    pub rel: String,
+    /// Filename without any `.disabled` suffix, for display.
+    pub file: String,
+    /// What the old instance had it set to, which is what wins.
+    pub enable: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModPlan {
     /// Jars needing a yes/no from the user.
@@ -70,9 +92,17 @@ pub struct ModPlan {
     pub added: Vec<String>,
     /// Jars that carry across unchanged.
     pub unchanged: usize,
+    /// Mods to switch back to the state you had them in.
+    pub state_changes: Vec<ModStateChange>,
 }
 
 impl ModPlan {
+    pub fn disabled_count(&self) -> usize {
+        self.state_changes.iter().filter(|c| !c.enable).count()
+    }
+    pub fn reenabled_count(&self) -> usize {
+        self.state_changes.iter().filter(|c| c.enable).count()
+    }
     pub fn removed_count(&self) -> usize {
         self.decisions
             .iter()
@@ -110,18 +140,55 @@ pub fn plan(
     let mut out = ModPlan::default();
 
     for (key, their_files) in &theirs_by_key {
-        match ours_by_key.get(key) {
-            None => out.added.extend(their_files.iter().cloned()),
-            Some(our_files) => {
-                let our_names: BTreeSet<&str> = our_files.iter().map(|s| s.as_str()).collect();
-                for tf in their_files {
-                    if our_names.contains(tf.as_str()) {
-                        out.unchanged += 1;
-                    } else {
-                        let from = our_files.first().cloned().unwrap_or_default();
-                        out.updated.push((file_name(&from), file_name(tf)));
-                    }
+        let Some(our_files) = ours_by_key.get(key) else {
+            out.added.extend(their_files.iter().cloned());
+            continue;
+        };
+
+        // Compare on the enabled name, so turning a mod off does not read as an
+        // update, and so a version bump can still carry the on/off state over.
+        let ours_enabled_names: BTreeMap<String, bool> = our_files
+            .iter()
+            .map(|rel| {
+                let file = file_name(rel);
+                let (name, enabled) = split_disabled(&file);
+                (name.to_string(), enabled)
+            })
+            .collect();
+        // Only fall back to a key-wide state when every file agrees; a mod with
+        // some variants on and some off is not something to guess about.
+        let key_state = {
+            let mut states = ours_enabled_names.values();
+            let first = states.next().copied();
+            match first {
+                Some(state) if ours_enabled_names.values().all(|s| *s == state) => Some(state),
+                _ => None,
+            }
+        };
+
+        for tf in their_files {
+            let their_file = file_name(tf);
+            let (their_name, their_enabled) = split_disabled(&their_file);
+
+            let wanted = ours_enabled_names.get(their_name).copied().or(key_state);
+            if let Some(wanted) = wanted {
+                if wanted != their_enabled {
+                    out.state_changes.push(ModStateChange {
+                        rel: tf.clone(),
+                        file: their_name.to_string(),
+                        enable: wanted,
+                    });
                 }
+            }
+
+            if ours_enabled_names.contains_key(their_name) {
+                out.unchanged += 1;
+            } else {
+                let from = our_files.first().cloned().unwrap_or_default();
+                let from_file = file_name(&from);
+                let (from_name, _) = split_disabled(&from_file);
+                out.updated
+                    .push((from_name.to_string(), their_name.to_string()));
             }
         }
     }
@@ -146,6 +213,7 @@ pub fn plan(
             });
         }
     }
+    out.state_changes.sort_by_key(|c| c.file.to_lowercase());
     out.decisions.sort_by(|a, b| {
         (a.kind == ModKind::UserAdded, a.file.to_lowercase())
             .cmp(&(b.kind == ModKind::UserAdded, b.file.to_lowercase()))
@@ -210,6 +278,64 @@ mod tests {
             .unwrap();
         assert_eq!(mine.kind, ModKind::UserAdded);
         assert!(mine.keep, "your own mods default to being kept");
+    }
+
+    /// Prism disables a mod by renaming it, so a mod you turned off must come
+    /// back off even though the new pack ships it enabled and at a new version.
+    #[test]
+    fn disabled_mods_stay_disabled_across_an_update() {
+        let base = set(&["mods/journeymap-5.2.20-fairplay.jar"]);
+        let ours = set(&["mods/journeymap-5.2.20-fairplay.jar.disabled"]);
+        let theirs = set(&["mods/journeymap-5.2.21-fairplay.jar"]);
+        let p = plan(&base, &ours, &theirs);
+
+        assert!(p.decisions.is_empty(), "turning a mod off is not a removal");
+        assert_eq!(
+            p.updated,
+            vec![(
+                "journeymap-5.2.20-fairplay.jar".to_string(),
+                "journeymap-5.2.21-fairplay.jar".to_string()
+            )],
+            "the update should be reported without the .disabled suffix"
+        );
+        assert_eq!(p.state_changes.len(), 1);
+        assert_eq!(
+            p.state_changes[0].rel,
+            "mods/journeymap-5.2.21-fairplay.jar"
+        );
+        assert!(!p.state_changes[0].enable);
+        assert_eq!(p.disabled_count(), 1);
+    }
+
+    #[test]
+    fn a_mod_you_turned_back_on_stays_on() {
+        let base = set(&["mods/optional-1.0.jar.disabled"]);
+        let ours = set(&["mods/optional-1.0.jar"]);
+        let theirs = set(&["mods/optional-1.0.jar.disabled"]);
+        let p = plan(&base, &ours, &theirs);
+        assert_eq!(p.unchanged, 1, "same version, only the state differs");
+        assert_eq!(p.state_changes.len(), 1);
+        assert!(p.state_changes[0].enable);
+        assert_eq!(p.reenabled_count(), 1);
+    }
+
+    #[test]
+    fn matching_states_need_no_change() {
+        let base = set(&["mods/a-1.0.jar", "mods/b-1.0.jar.disabled"]);
+        let ours = set(&["mods/a-1.0.jar", "mods/b-1.0.jar.disabled"]);
+        let theirs = set(&["mods/a-1.1.jar", "mods/b-1.1.jar.disabled"]);
+        let p = plan(&base, &ours, &theirs);
+        assert!(p.state_changes.is_empty());
+    }
+
+    /// A mod you added yourself keeps its filename, and therefore its state.
+    #[test]
+    fn your_own_disabled_mod_is_carried_as_disabled() {
+        let ours = set(&["mods/mine-1.0.jar.disabled"]);
+        let p = plan(&BTreeMap::new(), &ours, &BTreeMap::new());
+        assert_eq!(p.decisions.len(), 1);
+        assert!(p.decisions[0].keep);
+        assert_eq!(p.decisions[0].rel, "mods/mine-1.0.jar.disabled");
     }
 
     #[test]

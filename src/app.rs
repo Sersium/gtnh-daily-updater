@@ -920,6 +920,21 @@ impl App {
                         .color(pal_muted),
                     );
                 });
+                if !plan.mods.state_changes.is_empty() {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} mod{} will keep the on/off state you had them in.",
+                            plan.mods.state_changes.len(),
+                            if plan.mods.state_changes.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        ))
+                        .color(pal_ok)
+                        .size(12.0),
+                    );
+                }
                 ui.add_space(8.0);
 
                 for (kind, title, blurb) in [
@@ -1174,6 +1189,10 @@ impl App {
                         plan.mods.removed_count().to_string(),
                     ),
                     ("Your extra mods", plan.mods.extra_count().to_string()),
+                    (
+                        "Mods kept switched off",
+                        plan.mods.disabled_count().to_string(),
+                    ),
                     ("User data carried over", human_bytes(plan.carry_bytes())),
                 ];
                 egui::Grid::new("summary-counts")

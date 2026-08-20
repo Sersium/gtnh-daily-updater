@@ -352,6 +352,8 @@ fn report(prepared: &Prepared) {
     println!("  {:>6}  unchanged", p.mods.unchanged);
     println!("  {:>6}  removed by this build", p.mods.removed_count());
     println!("  {:>6}  yours, not in the pack", p.mods.extra_count());
+    println!("  {:>6}  kept switched off", p.mods.disabled_count());
+    println!("  {:>6}  kept switched on", p.mods.reenabled_count());
     println!("\nuser data");
     for g in &p.carry {
         println!(

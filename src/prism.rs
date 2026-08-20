@@ -88,9 +88,14 @@ pub fn candidate_roots() -> Vec<PathBuf> {
         }
     };
     if let Some(data) = dirs::data_dir() {
+        // On Windows this is %APPDATA%, where Prism installs by default.
         push(data.join("PrismLauncher/instances"));
         push(data.join("multimc/instances"));
         push(data.join("MultiMC/instances"));
+    }
+    if let Some(local) = dirs::data_local_dir() {
+        push(local.join("PrismLauncher/instances"));
+        push(local.join("MultiMC/instances"));
     }
     if let Some(home) = dirs::home_dir() {
         push(home.join(".var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances"));

@@ -1,9 +1,29 @@
+// No console window when the exe is double-clicked on Windows. The CLI modes
+// attach to whatever console launched them, see `attach_console`.
+#![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
+
 mod cli;
 
 use eframe::egui;
 use gtnh_updater::app;
 
+/// Reconnect stdout/stderr to the console that started us, if there was one.
+/// Without this a GUI-subsystem Windows binary prints into the void.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    // Failure just means we were not launched from a console; nothing to do.
+    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+}
+
+#[cfg(not(windows))]
+fn attach_console() {}
+
 fn main() {
+    // Harmless when there is no parent console (a double-clicked exe), and it
+    // has to happen before anything prints.
+    attach_console();
+
     let args = match cli::parse() {
         Ok(Some(args)) => args,
         Ok(None) => return,
