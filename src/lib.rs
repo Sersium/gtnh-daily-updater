@@ -4,10 +4,12 @@
 //! `plan` decides what happens to every file, `merge` does the three-way text
 //! merge, and `apply` writes the result into a brand-new instance.
 
+pub mod app;
 pub mod apply;
 pub mod github;
 pub mod httpzip;
 pub mod merge;
+pub mod merge_ui;
 pub mod mods;
 pub mod pack;
 pub mod plan;

@@ -99,6 +99,7 @@ gtnh-updater --apply --instance DIR     # do it, resolving conflicts by policy
 | `--keep-removed` | keep mods the new build dropped |
 | `--keep-download` | do not delete the downloaded pack zip afterwards |
 | `--token TOKEN` | GitHub token, if you would rather not use the environment |
+| `--ui-preview [SCREEN]` | open the interface filled with sample data, touching nothing |
 
 A nightly check, for example:
 
@@ -146,6 +147,9 @@ Prism caches its instance list, so restart it if the new instance does not show 
 | `prism.rs` | instance discovery, `instance.cfg` handling |
 | `apply.rs` | writes the decisions out and moves the instance into place |
 | `app.rs`, `merge_ui.rs` | the interface |
+
+Run `gtnh-updater --ui-preview` to see the interface with sample data — handy for
+looking at the conflict editor without downloading a pack first.
 
 ## Prior art
 

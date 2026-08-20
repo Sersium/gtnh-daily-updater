@@ -28,11 +28,15 @@ Options:
   --keep-removed       keep mods the new build dropped instead of removing them
   --keep-download      do not delete the downloaded pack zip afterwards
   --token TOKEN        GitHub token (default: $GH_TOKEN, $GITHUB_TOKEN, gh CLI)
+  --ui-preview [SCREEN] open the interface with sample data, touching nothing
+                       (conflicts, mods, files, summary, setup, working, done)
   -h, --help           show this
 ";
 
 pub enum Mode {
     Gui(Option<PathBuf>),
+    /// The interface, populated with sample data instead of a real instance.
+    Preview(String),
     Check,
     Plan,
     Apply,
@@ -82,6 +86,18 @@ pub fn parse() -> Result<Option<Args>> {
                 return Ok(None);
             }
             "--check" => args.mode = Mode::Check,
+            "--ui-preview" => {
+                // The screen name is optional, so only take the next token if it
+                // is not another flag.
+                let screen = match raw.get(i + 1) {
+                    Some(v) if !v.starts_with('-') => {
+                        i += 1;
+                        v.clone()
+                    }
+                    _ => "conflicts".to_string(),
+                };
+                args.mode = Mode::Preview(screen);
+            }
             "--plan" => args.mode = Mode::Plan,
             "--apply" => args.mode = Mode::Apply,
             "--instance" => args.instance = Some(PathBuf::from(next(&mut i)?)),

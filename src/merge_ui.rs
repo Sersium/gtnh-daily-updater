@@ -1,10 +1,10 @@
 //! The conflict editor: three-way hunks with per-hunk resolution, plus a raw
 //! whole-file escape hatch.
 
+use crate::merge::{Choice, Segment};
+use crate::plan::ConflictFile;
 use eframe::egui;
 use egui::{Color32, CornerRadius, RichText, Stroke};
-use gtnh_updater::merge::{Choice, Segment};
-use gtnh_updater::plan::ConflictFile;
 
 pub struct Palette {
     pub ours_bg: Color32,

@@ -1,14 +1,14 @@
 //! Wizard shell: pick an instance and a build, review what will change, apply.
 
+use crate::github::{DailyArtifact, Gh, VARIANT_JAVA17_26, VARIANT_JAVA8};
 use crate::merge_ui::{self, Palette};
+use crate::mods::ModKind;
+use crate::prism::{self, Instance};
+use crate::state::{self, InstanceState};
+use crate::util::human_bytes;
+use crate::worker::{self, ApplyJob, Cancel, Evt, Phase, PrepareJob, Prepared};
 use eframe::egui;
 use egui::{Color32, RichText};
-use gtnh_updater::github::{DailyArtifact, Gh, VARIANT_JAVA17_26, VARIANT_JAVA8};
-use gtnh_updater::mods::ModKind;
-use gtnh_updater::prism::{self, Instance};
-use gtnh_updater::state::{self, InstanceState};
-use gtnh_updater::util::human_bytes;
-use gtnh_updater::worker::{self, ApplyJob, Cancel, Evt, Phase, PrepareJob, Prepared};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -64,6 +64,9 @@ pub struct App {
     sel_conflict: usize,
     filter: String,
     done_dir: Option<PathBuf>,
+    styled: bool,
+    warmup_frames: u8,
+    preview_mode: bool,
 }
 
 impl App {
@@ -105,6 +108,9 @@ impl App {
             sel_conflict: 0,
             filter: String::new(),
             done_dir: None,
+            styled: false,
+            warmup_frames: 0,
+            preview_mode: false,
         };
         // A path on the command line wins over auto-discovery.
         if let Some(dir) = preselect {
@@ -173,6 +179,33 @@ impl App {
         worker::spawn_fetch_builds(self.tx.clone(), token, self.variant.clone());
     }
 
+    /// Jump to a named screen with sample data, for screenshots and manual poking.
+    pub fn preview_screen(&mut self, screen: &str) {
+        self.preview();
+        match screen {
+            "setup" => self.step = Step::Setup,
+            "mods" => self.tab = Tab::Mods,
+            "files" => self.tab = Tab::Files,
+            "summary" => self.tab = Tab::Summary,
+            "working" => self.step = Step::Working,
+            "done" => {
+                self.step = Step::Done;
+                self.done_dir = Some(PathBuf::from(
+                    "/home/you/.local/share/PrismLauncher/instances/GTNH-daily-690",
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    /// Jump straight to the review screen with sample data.
+    pub fn preview(&mut self) {
+        self.preview_mode = true;
+        self.prepared = Some(sample::prepared());
+        self.step = Step::Review;
+        self.tab = Tab::Conflicts;
+    }
+
     fn current_instance(&self) -> Option<&InstanceRow> {
         self.inst_idx.and_then(|i| self.instances.get(i))
     }
@@ -216,7 +249,11 @@ impl App {
                 }
             }
         }
-        if repaint || matches!(self.step, Step::Working | Step::Applying) || self.fetching {
+        if repaint
+            || self.preview_mode
+            || matches!(self.step, Step::Working | Step::Applying)
+            || self.fetching
+        {
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
         }
     }
@@ -318,9 +355,20 @@ impl App {
     /// The whole interface, independent of eframe so it can be driven headlessly.
     pub fn render(&mut self, ui: &mut egui::Ui) {
         self.pump(ui.ctx());
-        apply_style(ui.ctx());
+        if !self.styled {
+            self.styled = true;
+            apply_style(ui.ctx());
+        }
+        // An auto-sized panel only learns its real height once it has laid its
+        // content out, so on the very first frame it clips to a placeholder size.
+        // Repainting the first few frames means that frame is never the one left
+        // on screen if the compositor stops asking for more.
+        if self.warmup_frames < 3 {
+            self.warmup_frames += 1;
+            ui.ctx().request_repaint();
+        }
 
-        egui::Panel::top("header").show(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.heading("GTNH Daily Updater");
@@ -333,16 +381,16 @@ impl App {
                 });
             });
             ui.add_space(6.0);
-        });
+            ui.separator();
 
-        if let Some(err) = self.error.clone() {
-            egui::Panel::top("error").show(ui, |ui| {
+            if let Some(err) = self.error.clone() {
                 egui::Frame::default()
                     .fill(Color32::from_rgb(62, 32, 34))
                     .inner_margin(egui::Margin::same(8))
                     .corner_radius(egui::CornerRadius::same(6))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| {
                             ui.label(RichText::new(err).color(Color32::from_rgb(240, 170, 170)));
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -355,16 +403,37 @@ impl App {
                         });
                     });
                 ui.add_space(4.0);
-            });
-        }
+            }
 
-        match self.step {
-            Step::Setup => self.setup_ui(ui),
-            Step::Working | Step::Applying => self.progress_ui(ui),
-            Step::Review => self.review_ui(ui),
-            Step::Done => self.done_ui(ui),
-        }
+            match self.step {
+                Step::Setup => self.setup_ui(ui),
+                Step::Working | Step::Applying => self.progress_ui(ui),
+                Step::Review => self.review_ui(ui),
+                Step::Done => self.done_ui(ui),
+            }
+        });
     }
+}
+
+/// Lay out `body` above a bar pinned to the bottom of the remaining space.
+///
+/// This is deliberately not an [`egui::Panel`]: an auto-sized top or bottom panel
+/// does not know its height until it has laid its content out once, so its first
+/// frame clips. Anything drawn inside a central panel gets the full rect straight
+/// away.
+fn with_bottom_bar(
+    ui: &mut egui::Ui,
+    bar: impl FnOnce(&mut egui::Ui),
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+        // In a bottom-up layout the first thing added sits lowest.
+        ui.add_space(6.0);
+        bar(ui);
+        ui.add_space(6.0);
+        ui.separator();
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), body);
+    });
 }
 
 /// First few paths in a group, for a hover tooltip.
@@ -376,6 +445,7 @@ fn preview(files: &[String]) -> String {
     out.join("\n")
 }
 
+/// Every non-ASCII character the interface can draw. Checked by a test.
 fn step_caption(step: Step) -> &'static str {
     match step {
         Step::Setup => "1 · Choose what to update",
@@ -401,34 +471,34 @@ fn apply_style(ctx: &egui::Context) {
 impl App {
     // ---------------------------------------------------------------- setup
     fn setup_ui(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("setup-actions").show(ui, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let ready = self.inst_idx.is_some()
-                    && !self.builds.is_empty()
-                    && !self.new_name.trim().is_empty();
-                if ui
-                    .add_enabled(
-                        ready,
-                        egui::Button::new(RichText::new("Start update").strong()),
-                    )
-                    .clicked()
-                {
-                    self.start_update();
-                }
-                if !ready {
-                    ui.label(
-                        RichText::new("Pick an instance and a build to continue")
-                            .color(self.pal.muted)
-                            .size(12.0),
-                    );
-                }
-            });
-            ui.add_space(6.0);
-        });
-
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical()
+        let mut start = false;
+        let ready =
+            self.inst_idx.is_some() && !self.builds.is_empty() && !self.new_name.trim().is_empty();
+        let muted = self.pal.muted;
+        with_bottom_bar(
+            ui,
+            |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            ready,
+                            egui::Button::new(RichText::new("Start update").strong()),
+                        )
+                        .clicked()
+                    {
+                        start = true;
+                    }
+                    if !ready {
+                        ui.label(
+                            RichText::new("Pick an instance and a build to continue")
+                                .color(muted)
+                                .size(12.0),
+                        );
+                    }
+                });
+            },
+            |ui| {
+                egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     self.section(ui, "Instance to update");
@@ -482,7 +552,7 @@ impl App {
                             egui::ScrollArea::vertical()
                                 .id_salt("instances")
                                 .max_height(190.0)
-                                .auto_shrink([false, false])
+                                .auto_shrink([false, true])
                                 .show(ui, |ui| {
                                     for (i, row) in self.instances.iter().enumerate() {
                                         let detail = match row.build {
@@ -566,7 +636,7 @@ impl App {
                     {
                         if let Some(b) = row.build {
                             let note = if a.build > b {
-                                format!("Updating daily {b} → daily {}.", a.build)
+                                format!("Updating daily {b} to daily {}.", a.build)
                             } else if a.build == b {
                                 format!("This instance is already on daily {b}.")
                             } else {
@@ -632,7 +702,11 @@ impl App {
                         });
                     ui.add_space(12.0);
                 });
-        });
+            },
+        );
+        if start {
+            self.start_update();
+        }
     }
 
     fn section(&self, ui: &mut egui::Ui, title: &str) {
@@ -674,57 +748,66 @@ impl App {
         let conflicts = prepared.plan.conflicts.len();
         let mods_pending = prepared.plan.mods.decisions.len();
 
-        egui::Panel::top("tabs").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let tabs = [
-                    (Tab::Conflicts, format!("Config conflicts ({conflicts})")),
-                    (Tab::Mods, format!("Mods ({mods_pending})")),
-                    (Tab::Files, "Files".to_string()),
-                    (Tab::Summary, "Summary".to_string()),
-                ];
-                for (tab, label) in tabs {
-                    if ui.selectable_label(self.tab == tab, label).clicked() {
-                        self.tab = tab;
+        let mut create = false;
+        let mut discard = false;
+        let warn = self.pal.warn;
+        let mut tab = self.tab;
+        with_bottom_bar(
+            ui,
+            |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(RichText::new("Create instance").strong()))
+                        .clicked()
+                    {
+                        create = true;
                     }
+                    if ui.button("Discard").clicked() {
+                        discard = true;
+                    }
+                    if unresolved > 0 {
+                        ui.label(
+                            RichText::new(format!(
+                                "{unresolved} conflict file{} still on the default (pack version)",
+                                if unresolved == 1 { "" } else { "s" }
+                            ))
+                            .color(warn)
+                            .size(12.0),
+                        );
+                    }
+                });
+            },
+            |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let tabs = [
+                        (Tab::Conflicts, format!("Config conflicts ({conflicts})")),
+                        (Tab::Mods, format!("Mods ({mods_pending})")),
+                        (Tab::Files, "Files".to_string()),
+                        (Tab::Summary, "Summary".to_string()),
+                    ];
+                    for (t, label) in tabs {
+                        if ui.selectable_label(tab == t, label).clicked() {
+                            tab = t;
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                ui.separator();
+                match self.tab {
+                    Tab::Conflicts => self.conflicts_ui(ui),
+                    Tab::Mods => self.mods_ui(ui),
+                    Tab::Files => self.files_ui(ui),
+                    Tab::Summary => self.summary_ui(ui),
                 }
-            });
-            ui.add_space(4.0);
-        });
-
-        egui::Panel::bottom("review-actions").show(ui, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .add(egui::Button::new(RichText::new("Create instance").strong()))
-                    .clicked()
-                {
-                    self.start_apply();
-                    return;
-                }
-                if ui.button("Discard").clicked() {
-                    self.discard();
-                    return;
-                }
-                if unresolved > 0 {
-                    ui.label(
-                        RichText::new(format!(
-                            "{unresolved} conflict file{} still on the default (pack version)",
-                            if unresolved == 1 { "" } else { "s" }
-                        ))
-                        .color(self.pal.warn)
-                        .size(12.0),
-                    );
-                }
-            });
-            ui.add_space(6.0);
-        });
-
-        egui::CentralPanel::default().show(ui, |ui| match self.tab {
-            Tab::Conflicts => self.conflicts_ui(ui),
-            Tab::Mods => self.mods_ui(ui),
-            Tab::Files => self.files_ui(ui),
-            Tab::Summary => self.summary_ui(ui),
-        });
+            },
+        );
+        self.tab = tab;
+        if create {
+            self.start_apply();
+        } else if discard {
+            self.discard();
+        }
     }
 
     fn conflicts_ui(&mut self, ui: &mut egui::Ui) {
@@ -778,7 +861,7 @@ impl App {
                     .show(ui, |ui| {
                         for i in &matching {
                             let c = &prepared.plan.conflicts[*i];
-                            let mark = if c.reviewed { "✔" } else { "•" };
+                            let mark = if c.reviewed { " " } else { "•" };
                             let color = if c.reviewed {
                                 self.pal.ok
                             } else {
@@ -923,7 +1006,7 @@ impl App {
                     |ui| {
                         for (from, to) in &plan.mods.updated {
                             ui.label(
-                                RichText::new(format!("{from}  →  {to}"))
+                                RichText::new(format!("{from}  ->  {to}"))
                                     .monospace()
                                     .size(12.0)
                                     .color(pal_muted),
@@ -1049,7 +1132,7 @@ impl App {
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new(format!(
-                        "{}  →  {}",
+                        "{}  ->  {}",
                         prepared.instance.name, prepared.display_name
                     ))
                     .size(16.0)
@@ -1093,14 +1176,16 @@ impl App {
                     ("Your extra mods", plan.mods.extra_count().to_string()),
                     ("User data carried over", human_bytes(plan.carry_bytes())),
                 ];
-                for (label, value) in rows {
-                    ui.horizontal(|ui| {
-                        ui.allocate_ui(egui::vec2(280.0, 18.0), |ui| {
+                egui::Grid::new("summary-counts")
+                    .num_columns(2)
+                    .spacing([28.0, 6.0])
+                    .show(ui, |ui| {
+                        for (label, value) in rows {
                             ui.label(RichText::new(label).color(pal_muted));
-                        });
-                        ui.label(RichText::new(value).monospace());
+                            ui.label(RichText::new(value).monospace());
+                            ui.end_row();
+                        }
                     });
-                }
 
                 ui.add_space(12.0);
                 let color = if plan.base_missing {
@@ -1149,14 +1234,15 @@ impl App {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Sample data for `--ui-preview` and for the render tests: enough of a plan to
+/// exercise every screen without downloading a 700 MB pack first.
+pub mod sample {
     use super::*;
-    use gtnh_updater::github::DailyArtifact;
-    use gtnh_updater::merge::{self, MergeOutcome};
-    use gtnh_updater::plan::{BinaryConflict, CarryGroup, ConflictFile, Plan};
+    use crate::github::DailyArtifact;
+    use crate::merge::{self, MergeOutcome};
+    use crate::plan::{BinaryConflict, CarryGroup, ConflictFile, Plan};
 
-    fn sample_conflict(rel: &str) -> ConflictFile {
+    pub fn conflict(rel: &str) -> ConflictFile {
         let MergeOutcome::Conflicted(m) = merge::three_way(
             "pollution=true\nnoise=1\n",
             "pollution=false\nnoise=1\n",
@@ -1172,7 +1258,7 @@ mod tests {
         }
     }
 
-    fn sample_prepared() -> Prepared {
+    pub fn prepared() -> Prepared {
         let mut plan = Plan {
             take_pack: 12,
             identical: 900,
@@ -1181,9 +1267,12 @@ mod tests {
         plan.auto_merged
             .push(("config/angelica.cfg".into(), "x=1\n".into()));
         plan.keep_yours.push("config/NEI/client.cfg".into());
-        plan.conflicts.push(sample_conflict("config/GregTech.cfg"));
         plan.conflicts
-            .push(sample_conflict("serverutilities/serverutilities.cfg"));
+            .push(conflict("config/GregTech/MachineStats.cfg"));
+        plan.conflicts
+            .push(conflict("serverutilities/serverutilities.cfg"));
+        plan.conflicts
+            .push(conflict("config/DreamCoreMod.properties"));
         plan.binary_conflicts.push(BinaryConflict {
             rel: "servers.dat".into(),
             ours_size: 10,
@@ -1196,7 +1285,7 @@ mod tests {
             bytes: 1234,
             enabled: true,
         });
-        plan.mods = gtnh_updater::mods::plan(
+        plan.mods = crate::mods::plan(
             &[("mods/gone-1.0.jar".to_string(), 1u64)]
                 .into_iter()
                 .collect(),
@@ -1234,6 +1323,12 @@ mod tests {
             old_build: Some(641),
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sample;
+    use super::*;
 
     /// Render every screen a few frames. egui panics on bad layout nesting, so
     /// this catches structural mistakes without needing a window.
@@ -1253,7 +1348,7 @@ mod tests {
         ];
         for (step, tab) in screens {
             if step == Step::Review {
-                app.prepared = Some(sample_prepared());
+                app.prepared = Some(sample::prepared());
             }
             app.step = step;
             if let Some(tab) = tab {
@@ -1272,11 +1367,52 @@ mod tests {
     /// Resolving a conflict changes what gets written for that file.
     #[test]
     fn conflict_choices_change_the_output() {
-        let mut file = sample_conflict("config/GregTech.cfg");
+        let mut file = sample::conflict("config/GregTech.cfg");
         assert_eq!(file.merge.render(), "pollution=maybe\nnoise=1\n");
-        file.merge.hunks[0].choice = merge::Choice::Ours;
+        file.merge.hunks[0].choice = crate::merge::Choice::Ours;
         assert_eq!(file.merge.render(), "pollution=false\nnoise=1\n");
         file.merge.manual = Some("pollution=custom\n".into());
         assert_eq!(file.merge.render(), "pollution=custom\n");
+    }
+}
+
+#[cfg(test)]
+mod glyph_tests {
+    use eframe::egui;
+
+    /// egui ships its own fonts, and they are narrower than they look — arrows
+    /// and check marks are simply not in there, and a missing glyph draws as a
+    /// tofu box on every machine. So every non-ASCII character in the interface
+    /// source gets checked rather than assumed.
+    #[test]
+    fn every_symbol_the_ui_prints_has_a_glyph() {
+        let ctx = egui::Context::default();
+        // Force font loading.
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.label("warmup");
+        });
+        out.textures_delta.clear();
+
+        // Scan the interface sources rather than a hand-kept list, so a symbol
+        // added tomorrow is checked too.
+        let sources = concat!(include_str!("app.rs"), include_str!("merge_ui.rs"));
+        let mut used: Vec<char> = sources.chars().filter(|c| !c.is_ascii()).collect();
+        used.sort_unstable();
+        used.dedup();
+
+        let font = egui::FontId::proportional(14.0);
+        let missing: Vec<char> = ctx.fonts_mut(|f| {
+            let mut missing = Vec::new();
+            for c in used {
+                if !f.has_glyph(&font, c) {
+                    missing.push(c);
+                }
+            }
+            missing
+        });
+        assert!(
+            missing.is_empty(),
+            "egui's bundled fonts have no glyph for {missing:?}; these would draw as tofu boxes"
+        );
     }
 }
