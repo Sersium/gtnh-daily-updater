@@ -1,0 +1,33 @@
+[package]
+name = "gtnh-updater"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Daily GTNH modpack updater with 3-way config merging for Prism Launcher"
+license = "MIT"
+
+[dependencies]
+eframe = "0.36"
+egui = "0.36"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3", features = ["json"] }
+crc32fast = "1"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+diffy = "0.5"
+walkdir = "2"
+dirs = "6"
+
+[lib]
+name = "gtnh_updater"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gtnh-updater"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
