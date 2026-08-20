@@ -108,10 +108,19 @@ gtnh-updater --check --instance ~/.local/share/PrismLauncher/instances/GTNH-DAIL
 
 ## What ends up where
 
-The new instance is built in `<instances>/<name>.part` and moved into place only when
-everything has been written, so an interrupted run never leaves a half-instance Prism
-might try to launch. Downloaded pack zips are cached in `~/.cache/gtnh-updater/` and
-deleted after a successful update unless you ask to keep them.
+The new instance is built in `<instances>/<name>.part` and moved into place only once
+everything has been written, so an interrupted or cancelled run cleans up after itself
+rather than leaving a half-instance Prism might try to launch.
+
+Each instance the updater creates carries `<instance>/.gtnh-updater/`:
+
+- `state.json` — which build it is, so the next update knows where it started
+- `base.zip` — the pack's pristine text config (~25 MB compressed) plus a checksum for
+  every file it shipped, which is what makes the *next* merge a real three-way one
+  without touching the network
+
+Downloaded pack zips are cached in `~/.cache/gtnh-updater/` and deleted after a
+successful update unless you pass `--keep-download` or tick the box.
 
 Prism caches its instance list, so restart it if the new instance does not show up.
 
@@ -122,8 +131,7 @@ Prism caches its instance list, so restart it if the new instance does not show 
   their original side.
 - Adjacent edits count as conflicts. If you added a line directly below one the pack
   changed, that is a collision — `git merge-file` reports it the same way.
-- The updater never writes to the instance you are updating. If something goes wrong,
-  the worst case is a stray `.part` directory you can delete.
+- The updater never writes to the instance you are updating.
 
 ## Layout
 

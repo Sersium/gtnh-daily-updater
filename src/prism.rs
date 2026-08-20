@@ -127,6 +127,11 @@ pub fn list_instances(root: &Path) -> Vec<Instance> {
     out
 }
 
+/// Keys written before any `[section]` header. Prism writes `instance.cfg`
+/// through Qt's QSettings, which files those under `General` — and the pack ships
+/// exactly that shape, with no header at all.
+pub const DEFAULT_SECTION: &str = "General";
+
 /// A line-preserving INI reader/writer. Prism rewrites `instance.cfg` itself, but
 /// keeping comments and ordering intact makes diffs between instances readable.
 #[derive(Debug, Clone, Default)]
@@ -148,7 +153,7 @@ enum Line {
 impl Ini {
     pub fn parse(text: &str) -> Self {
         let mut lines = Vec::new();
-        let mut section = String::new();
+        let mut section = DEFAULT_SECTION.to_string();
         for raw in text.lines() {
             let t = raw.trim();
             if t.starts_with('[') && t.ends_with(']') {
@@ -379,6 +384,28 @@ mod tests {
         assert_eq!(merged.get("General", "name").unwrap(), "GTNH-daily-690");
         assert_ne!(merged.get("General", "uuid").unwrap(), "bbb");
         assert_eq!(merged.get("UI", "foo").unwrap(), "bar");
+    }
+
+    /// The pack's own `instance.cfg` has no `[General]` header, so settings must
+    /// still be found and replaced in place rather than appended a second time.
+    #[test]
+    fn headerless_keys_belong_to_general() {
+        let pack = Ini::parse("InstanceType=OneSix\nOverrideJavaArgs=false\nname=GTNH 2.9.x\n");
+        assert_eq!(pack.get("General", "OverrideJavaArgs").unwrap(), "false");
+
+        let old = Ini::parse("[General]\nOverrideJavaArgs=true\nJvmArgs=-Xmx8G\n");
+        let merged = merge_instance_cfg(&pack, &old, "GTNH-daily-690");
+
+        let text = merged.to_string();
+        assert_eq!(text.matches("OverrideJavaArgs=").count(), 1, "{text}");
+        assert_eq!(
+            text.matches("\nname=").count() + usize::from(text.starts_with("name=")),
+            1,
+            "{text}"
+        );
+        assert_eq!(merged.get("General", "OverrideJavaArgs").unwrap(), "true");
+        assert_eq!(merged.get("General", "name").unwrap(), "GTNH-daily-690");
+        assert_eq!(merged.get("General", "InstanceType").unwrap(), "OneSix");
     }
 
     #[test]
